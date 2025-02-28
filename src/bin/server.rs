@@ -1,18 +1,11 @@
+use futures_util::StreamExt;
 use std::{
     collections::HashSet,
     error::Error,
     sync::{Arc, Mutex},
     time::Duration,
 };
-
-use tokio::net::{TcpListener, ToSocketAddrs};
-
-use http_body_util::{combinators::BoxBody, BodyExt, Empty, Full};
-use hyper_util::rt::TokioIo;
-
-use hyper::{server::conn::http1, service::service_fn, Method, Request, Response, StatusCode};
-
-use bytes::Bytes;
+use tokio::net::{TcpListener, TcpStream, ToSocketAddrs};
 
 type Channels = Arc<Mutex<HashSet<String>>>;
 
@@ -38,68 +31,41 @@ where
         println!("Server: Listening");
 
         while let Ok((stream, _)) = listener.accept().await {
-            let io = TokioIo::new(stream);
             let channels = Arc::clone(&self.channels);
 
             tokio::spawn(async move {
-                if let Err(err) = http1::Builder::new()
-                    .serve_connection(
-                        io,
-                        service_fn(move |req| Self::handle_request(req, Arc::clone(&channels))),
-                    )
-                    .await
-                {
-                    eprintln!("Error serving connection: {:?}", err);
-                }
+                // process stream
+
+                Self::process_stream(stream, channels).await;
             });
         }
 
         Ok(())
     }
 
-    async fn handle_request(
-        req: Request<hyper::body::Incoming>,
-        channels: Channels,
-    ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, hyper::Error> {
-        match (req.method(), req.uri().path()) {
-            (&Method::GET, "/") => Ok(Response::new(full("hello"))),
-            (&Method::POST, "/join") => {
-                // client wants to join
-                let channel = String::from_utf8(req.collect().await?.to_bytes().to_vec()).unwrap();
+    async fn process_stream(stream: TcpStream, _channels: Channels) {
+        let addr = stream
+            .peer_addr()
+            .expect("connected streams should have a peer address");
+        println!("Peer address: {}", addr);
 
-                tokio::time::sleep(Duration::from_secs(5)).await; // simulate long request processing
+        let ws_stream = tokio_tungstenite::accept_async(stream)
+            .await
+            .expect("Error during the websocket handshake occurred");
 
-                let mut channels = channels.lock().unwrap(); // lock channels
-                let is_new = channels.insert(channel.clone()); // TODO: remove clone later
+        println!("New WebSocket connection: {}", addr);
 
-                Ok(Response::new(full(format!(
-                    "/join, {} \n created channel {}",
-                    &channel, is_new
-                ))))
-            }
-            _ => {
-                let mut not_found = Response::new(empty());
-                *not_found.status_mut() = StatusCode::NOT_FOUND;
-                Ok(not_found)
-            }
-        }
+        let (write, read) = ws_stream.split();
+        // We should not forward messages other than text or binary.
+        read.forward(write)
+            .await
+            .expect("Failed to forward messages")
     }
-}
-
-fn empty() -> BoxBody<Bytes, hyper::Error> {
-    Empty::<Bytes>::new()
-        .map_err(|never| match never {})
-        .boxed()
-}
-fn full<T: Into<Bytes>>(chunk: T) -> BoxBody<Bytes, hyper::Error> {
-    Full::new(chunk.into())
-        .map_err(|never| match never {})
-        .boxed()
 }
 
 #[tokio::main]
 async fn main() {
-    let server = Server::new("127.0.0.1:4000");
+    let server = Server::new("127.0.0.1:8080");
 
     // start server on current thread
     // no specific new thread is created for that

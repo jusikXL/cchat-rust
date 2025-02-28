@@ -4,8 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-hyper = { version = "1", features = ["full"] }
+futures-channel = "0.3.31"
+futures-util = "0.3.31"
 tokio = { version = "1", features = ["full"] }
-http-body-util = "0.1"
-hyper-util = { version = "0.1", features = ["full"] }
-bytes = "1.10.0"
+tokio-tungstenite = "*"
