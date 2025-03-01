@@ -16,15 +16,11 @@ use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::Message;
 
 type Tx = UnboundedSender<Message>;
-// addr => tx
-type PeerMap = Arc<Mutex<HashMap<SocketAddr, Tx>>>;
-
-// type Channels = Arc<Mutex<HashSet<String>>>;
+type PeerMap = Arc<Mutex<HashMap<SocketAddr, Tx>>>; // addr => tx
 
 pub struct Server<A: ToSocketAddrs> {
     addr: A,
-    peer_map: PeerMap,
-    // will block the thread server and possible other tasks are on for some time
+    peer_map: PeerMap, // will block the real thread for some time
 }
 
 impl<A> Server<A>
@@ -74,7 +70,10 @@ where
             while let Some(msg) = rx.recv().await {
                 println!("sending");
                 // sink all messages received from each tx into the stream
-                outgoing.send(msg).await.expect("sending message");
+                outgoing
+                    .send(msg)
+                    .await
+                    .expect("sending message down the stream");
             }
         });
 
@@ -84,8 +83,7 @@ where
             println!("Received a message from {}: {}", addr, msg);
 
             let peer_map = peer_map.lock().unwrap();
-
-            // DEADLOCK SOMEWHERE
+            // must be locked for entier broadcast process
 
             // We want to broadcast the message to everyone except ourselves.
             let broadcast_recipients = peer_map
@@ -95,7 +93,7 @@ where
 
             for tx in broadcast_recipients {
                 // send from each tx to a single rx
-                tx.send(msg.clone()).unwrap();
+                tx.send(msg.clone()).expect("sending message from tx to rx");
             }
         }
     }
