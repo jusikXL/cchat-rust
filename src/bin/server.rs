@@ -1,17 +1,29 @@
-use futures_util::StreamExt;
 use std::{
-    collections::HashSet,
+    collections::HashMap,
     error::Error,
+    net::SocketAddr,
     sync::{Arc, Mutex},
     time::Duration,
 };
-use tokio::net::{TcpListener, TcpStream, ToSocketAddrs};
 
-type Channels = Arc<Mutex<HashSet<String>>>;
+use tokio::{
+    net::{TcpListener, TcpStream, ToSocketAddrs},
+    sync::mpsc::{self, UnboundedSender},
+};
+
+use futures_util::{SinkExt, StreamExt};
+
+use tokio_tungstenite::tungstenite::Message;
+
+type Tx = UnboundedSender<Message>;
+// addr => tx
+type PeerMap = Arc<Mutex<HashMap<SocketAddr, Tx>>>;
+
+// type Channels = Arc<Mutex<HashSet<String>>>;
 
 pub struct Server<A: ToSocketAddrs> {
     addr: A,
-    channels: Channels,
+    peer_map: PeerMap,
     // will block the thread server and possible other tasks are on for some time
 }
 
@@ -22,7 +34,7 @@ where
     pub fn new(addr: A) -> Self {
         Self {
             addr,
-            channels: Arc::new(Mutex::new(HashSet::new())),
+            peer_map: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -30,36 +42,62 @@ where
         let listener = TcpListener::bind(&self.addr).await?;
         println!("Server: Listening");
 
-        while let Ok((stream, _)) = listener.accept().await {
-            let channels = Arc::clone(&self.channels);
+        while let Ok((stream, addr)) = listener.accept().await {
+            let peer_map = Arc::clone(&self.peer_map);
 
             tokio::spawn(async move {
-                // process stream
+                tokio::time::sleep(Duration::from_secs(1)).await; // simulate long processing
 
-                Self::process_stream(stream, channels).await;
+                Self::handle_connection((stream, addr), peer_map).await;
             });
         }
 
         Ok(())
     }
 
-    async fn process_stream(stream: TcpStream, _channels: Channels) {
-        let addr = stream
-            .peer_addr()
-            .expect("connected streams should have a peer address");
-        println!("Peer address: {}", addr);
+    async fn handle_connection(conn: (TcpStream, SocketAddr), peer_map: PeerMap) {
+        let (stream, addr) = conn;
 
         let ws_stream = tokio_tungstenite::accept_async(stream)
             .await
-            .expect("Error during the websocket handshake occurred");
+            .expect("websocket handshake");
 
-        println!("New WebSocket connection: {}", addr);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        {
+            peer_map.lock().unwrap().insert(addr, tx);
+        }
 
-        let (write, read) = ws_stream.split();
-        // We should not forward messages other than text or binary.
-        read.forward(write)
-            .await
-            .expect("Failed to forward messages")
+        // let (write, read)
+        let (mut outgoing, mut incoming) = ws_stream.split();
+
+        tokio::spawn(async move {
+            while let Some(msg) = rx.recv().await {
+                println!("sending");
+                // sink all messages received from each tx into the stream
+                outgoing.send(msg).await.expect("sending message");
+            }
+        });
+
+        while let Some(msg) = incoming.next().await {
+            let msg = msg.expect("receiving message");
+
+            println!("Received a message from {}: {}", addr, msg);
+
+            let peer_map = peer_map.lock().unwrap();
+
+            // DEADLOCK SOMEWHERE
+
+            // We want to broadcast the message to everyone except ourselves.
+            let broadcast_recipients = peer_map
+                .iter()
+                .filter(|(peer_addr, _)| peer_addr != &&addr)
+                .map(|(_, tx)| tx);
+
+            for tx in broadcast_recipients {
+                // send from each tx to a single rx
+                tx.send(msg.clone()).unwrap();
+            }
+        }
     }
 }
 
