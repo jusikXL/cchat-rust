@@ -34,7 +34,8 @@ async fn main() {
     let ws_to_stdout = {
         read.for_each(|message| async {
             let data = message.unwrap().into_data();
-            tokio::io::stdout().write_all(&data).await.unwrap();
+            println!("{data:?}");
+            // tokio::io::stdout().write_all(&data).await.unwrap();
         })
     };
 
@@ -53,6 +54,7 @@ async fn read_stdin(tx: futures_channel::mpsc::UnboundedSender<Message>) {
             Ok(n) => n,
         };
         buf.truncate(n);
-        tx.unbounded_send(Message::binary(buf)).unwrap();
+        let text = String::from_utf8(buf).unwrap();
+        tx.unbounded_send(Message::text(text)).unwrap();
     }
 }

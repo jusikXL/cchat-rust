@@ -15,12 +15,13 @@ use futures_util::{SinkExt, StreamExt};
 
 use tokio_tungstenite::tungstenite::Message;
 
-type Tx = UnboundedSender<Message>;
-type PeerMap = Arc<Mutex<HashMap<SocketAddr, Tx>>>; // addr => tx
+type Client = UnboundedSender<Message>;
+type Clients = HashMap<SocketAddr, Client>;
+type Channels = Arc<Mutex<HashMap<String, Clients>>>; // addr => tx
 
 pub struct Server<A: ToSocketAddrs> {
     addr: A,
-    peer_map: PeerMap, // will block the real thread for some time
+    channels: Channels, // will block the real thread for some time
 }
 
 impl<A> Server<A>
@@ -30,7 +31,7 @@ where
     pub fn new(addr: A) -> Self {
         Self {
             addr,
-            peer_map: Arc::new(Mutex::new(HashMap::new())),
+            channels: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -39,32 +40,28 @@ where
         println!("Server: Listening");
 
         while let Ok((stream, addr)) = listener.accept().await {
-            let peer_map = Arc::clone(&self.peer_map);
+            let channels = Arc::clone(&self.channels);
 
             tokio::spawn(async move {
                 tokio::time::sleep(Duration::from_secs(1)).await; // simulate long processing
 
-                Self::handle_connection((stream, addr), peer_map).await;
+                Self::handle_connection((stream, addr), channels).await;
             });
         }
 
         Ok(())
     }
 
-    async fn handle_connection(conn: (TcpStream, SocketAddr), peer_map: PeerMap) {
+    async fn handle_connection(conn: (TcpStream, SocketAddr), channels: Channels) {
         let (stream, addr) = conn;
 
         let ws_stream = tokio_tungstenite::accept_async(stream)
             .await
             .expect("websocket handshake");
-
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        {
-            peer_map.lock().unwrap().insert(addr, tx);
-        }
-
         // let (write, read)
         let (mut outgoing, mut incoming) = ws_stream.split();
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
 
         tokio::spawn(async move {
             while let Some(msg) = rx.recv().await {
@@ -81,21 +78,64 @@ where
             // if we receive message from this client
             // send them to other clients
 
-            let msg = msg.expect("receiving message from this client");
+            match msg {
+                Ok(Message::Text(text)) => {
+                    if text.starts_with("/join") {
+                        let channel = text[5..].trim().to_string();
 
-            let peer_map = peer_map.lock().unwrap();
-            // must be locked for entier broadcast process
+                        println!("joining {channel}");
 
-            // We want to broadcast the message to everyone except ourselves.
-            let broadcast_recipients = peer_map
-                .iter()
-                .filter(|(peer_addr, _)| peer_addr != &&addr)
-                .map(|(_, tx)| tx);
+                        let mut channels = channels.lock().unwrap();
 
-            for tx in broadcast_recipients {
-                // send from each tx to a single rx
-                tx.send(msg.clone())
-                    .expect("sending message to other clients");
+                        let clients = channels.entry(channel).or_default();
+                        clients.entry(addr).or_insert(tx.clone());
+                    } else if text.starts_with("/leave") {
+                        let channel = text[6..].trim().to_string();
+
+                        println!("leaving {channel}");
+
+                        let mut channels = channels.lock().unwrap();
+
+                        if let Some(clients) = channels.get_mut(&channel) {
+                            match clients.remove(&addr) {
+                                None => eprintln!("Client has not joined"),
+                                Some(_) => {}
+                            }
+                        } else {
+                            eprintln!("No such channel exists");
+                        }
+                    } else if text.starts_with("/send") {
+                        println!("sending");
+
+                        let parts: Vec<&str> = text[5..].trim().splitn(2, ' ').collect();
+
+                        println!("{:?}", parts);
+
+                        if parts.len() < 2 {
+                            eprintln!("Invalid send format")
+                        }
+
+                        let (channel, message) = (parts[0], parts[1]);
+
+                        let channels = channels.lock().unwrap();
+
+                        if let Some(clients) = channels.get(channel) {
+                            for (peer_addr, peer_tx) in clients {
+                                if peer_addr != &addr {
+                                    peer_tx
+                                        .send(Message::text(message.to_string()))
+                                        .expect("sending message to other clients");
+                                }
+                            }
+                        } else {
+                            eprintln!("No such channel exists");
+                        }
+                    }
+                }
+                Ok(_) => {
+                    eprintln!("Non-text message");
+                }
+                Err(e) => eprintln!("Error receiving message: {}", e),
             }
         }
     }
