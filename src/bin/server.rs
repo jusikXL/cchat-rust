@@ -68,19 +68,20 @@ where
 
         tokio::spawn(async move {
             while let Some(msg) = rx.recv().await {
-                println!("sending");
-                // sink all messages received from each tx into the stream
+                // if we receive message from other clients
+                // send them down the stream
                 outgoing
                     .send(msg)
                     .await
-                    .expect("sending message down the stream");
+                    .expect("sending message from other clients");
             }
         });
 
         while let Some(msg) = incoming.next().await {
-            let msg = msg.expect("receiving message");
+            // if we receive message from this client
+            // send them to other clients
 
-            println!("Received a message from {}: {}", addr, msg);
+            let msg = msg.expect("receiving message from this client");
 
             let peer_map = peer_map.lock().unwrap();
             // must be locked for entier broadcast process
@@ -93,7 +94,8 @@ where
 
             for tx in broadcast_recipients {
                 // send from each tx to a single rx
-                tx.send(msg.clone()).expect("sending message from tx to rx");
+                tx.send(msg.clone())
+                    .expect("sending message to other clients");
             }
         }
     }
