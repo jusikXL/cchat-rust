@@ -155,10 +155,7 @@ where
             Some(users) => {
                 match users.get_mut(&user_addr) {
                     // User has already joined
-                    Some(_) => {
-                        // Return error
-                        Err(ServerError::UserAlreadyJoined)
-                    }
+                    Some(_) => Err(ServerError::UserAlreadyJoined),
                     // User has not joined
                     None => {
                         // Add user
@@ -197,10 +194,7 @@ where
                 }
             }
             // Channel does not exist
-            None => {
-                // Return error
-                Err(ServerError::NonExistentChannel)
-            }
+            None => Err(ServerError::NonExistentChannel),
         }
     }
 
@@ -234,10 +228,7 @@ where
                 }
             }
             // Channel does not exist
-            None => {
-                // Return error
-                Err(ServerError::NonExistentChannel)
-            }
+            None => Err(ServerError::NonExistentChannel),
         }
     }
 }
