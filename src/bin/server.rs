@@ -78,9 +78,10 @@ where
         let outgoing_task = tokio::spawn(async move {
             while let Some(msg) = rx.recv().await {
                 // if we receive message, send them down the stream
-                if let Err(e) = outgoing.send(msg).await {
-                    return Err(ServerError::WebSocketError(e));
-                }
+                outgoing
+                    .send(msg)
+                    .await
+                    .map_err(|e| ServerError::WebSocketError(e))?
             }
 
             Ok(())
