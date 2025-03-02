@@ -3,7 +3,6 @@ use std::{
     error::Error,
     net::SocketAddr,
     sync::{Arc, Mutex},
-    time::Duration,
 };
 
 use tokio::{
@@ -15,9 +14,23 @@ use futures_util::{SinkExt, StreamExt};
 
 use tokio_tungstenite::tungstenite::Message;
 
-type Client = UnboundedSender<Message>;
-type Clients = HashMap<SocketAddr, Client>;
-type Channels = Arc<Mutex<HashMap<String, Clients>>>; // addr => tx
+enum JoinError {
+    AlreadyJoined,
+}
+
+enum LeaveError {
+    NonExistentChannel,
+    NonExistentUser,
+}
+
+enum SendError {
+    NonExistentChannel,
+    BroadcastError,
+}
+
+type User = UnboundedSender<Message>;
+type Users = HashMap<SocketAddr, User>;
+type Channels = Arc<Mutex<HashMap<String, Users>>>; // addr => tx
 
 pub struct Server<A: ToSocketAddrs> {
     addr: A,
@@ -42,9 +55,8 @@ where
         while let Ok((stream, addr)) = listener.accept().await {
             let channels = Arc::clone(&self.channels);
 
+            // Spawn a separate task
             tokio::spawn(async move {
-                tokio::time::sleep(Duration::from_secs(1)).await; // simulate long processing
-
                 Self::handle_connection((stream, addr), channels).await;
             });
         }
@@ -52,12 +64,13 @@ where
         Ok(())
     }
 
-    async fn handle_connection(conn: (TcpStream, SocketAddr), channels: Channels) {
-        let (stream, addr) = conn;
+    async fn handle_connection((stream, addr): (TcpStream, SocketAddr), channels: Channels) {
+        // tokio::time::sleep(Duration::from_secs(1)).await; // simulate long processing
 
         let ws_stream = tokio_tungstenite::accept_async(stream)
             .await
             .expect("websocket handshake");
+
         // let (write, read)
         let (mut outgoing, mut incoming) = ws_stream.split();
 
@@ -83,59 +96,113 @@ where
                     if text.starts_with("/join") {
                         let channel = text[5..].trim().to_string();
 
-                        println!("joining {channel}");
-
-                        let mut channels = channels.lock().unwrap();
-
-                        let clients = channels.entry(channel).or_default();
-                        clients.entry(addr).or_insert(tx.clone());
+                        Self::join(addr, tx.clone(), channel, &channels);
                     } else if text.starts_with("/leave") {
                         let channel = text[6..].trim().to_string();
 
-                        println!("leaving {channel}");
-
-                        let mut channels = channels.lock().unwrap();
-
-                        if let Some(clients) = channels.get_mut(&channel) {
-                            match clients.remove(&addr) {
-                                None => eprintln!("Client has not joined"),
-                                Some(_) => {}
-                            }
-                        } else {
-                            eprintln!("No such channel exists");
-                        }
+                        Self::leave(&addr, &channel, &channels);
                     } else if text.starts_with("/send") {
-                        println!("sending");
-
                         let parts: Vec<&str> = text[5..].trim().splitn(2, ' ').collect();
 
-                        println!("{:?}", parts);
-
-                        if parts.len() < 2 {
-                            eprintln!("Invalid send format")
-                        }
-
-                        let (channel, message) = (parts[0], parts[1]);
-
-                        let channels = channels.lock().unwrap();
-
-                        if let Some(clients) = channels.get(channel) {
-                            for (peer_addr, peer_tx) in clients {
-                                if peer_addr != &addr {
-                                    peer_tx
-                                        .send(Message::text(message.to_string()))
-                                        .expect("sending message to other clients");
-                                }
-                            }
-                        } else {
-                            eprintln!("No such channel exists");
-                        }
+                        Self::send(&addr, parts[1], parts[0], &channels);
                     }
                 }
                 Ok(_) => {
-                    eprintln!("Non-text message");
+                    // Handle non-text message
                 }
-                Err(e) => eprintln!("Error receiving message: {}", e),
+                Err(e) => {
+                    // Handle error receiving message
+                }
+            }
+        }
+    }
+
+    fn join(
+        user_addr: SocketAddr,
+        user_tx: User,
+        channel: String,
+        channels: &Channels,
+    ) -> Result<(), JoinError> {
+        let mut channels = channels.lock().unwrap();
+        println!("{user_addr} joins {channel}");
+
+        match channels.get_mut(&channel) {
+            // Channel has already been created
+            Some(users) => {
+                match users.get_mut(&user_addr) {
+                    // User has already joined
+                    Some(_) => {
+                        // Return error
+                        Err(JoinError::AlreadyJoined)
+                    }
+                    // User has not joined
+                    None => {
+                        // Add user
+                        users.insert(user_addr, user_tx);
+                        Ok(())
+                    }
+                }
+            }
+            // Channel does not exist
+            None => {
+                // Create channel, add user
+                let mut users = HashMap::new();
+                users.insert(user_addr, user_tx);
+
+                channels.insert(channel, users);
+                Ok(())
+            }
+        }
+    }
+
+    fn leave(user_addr: &SocketAddr, channel: &str, channels: &Channels) -> Result<(), LeaveError> {
+        let mut channels = channels.lock().unwrap();
+        println!("{user_addr} leaves {channel}");
+
+        match channels.get_mut(channel) {
+            // Channel has been created
+            Some(users) => {
+                match users.remove(user_addr) {
+                    // User has been removed
+                    Some(_) => Ok(()),
+                    // Not found user
+                    None => Err(LeaveError::NonExistentUser),
+                }
+            }
+            // Channel does not exist
+            None => {
+                // Return error
+                Err(LeaveError::NonExistentChannel)
+            }
+        }
+    }
+
+    fn send(
+        user_addr: &SocketAddr,
+        message: &str,
+        channel: &str,
+        channels: &Channels,
+    ) -> Result<(), SendError> {
+        let channels = channels.lock().unwrap();
+        println!("{user_addr} sends {message} to {channel}");
+
+        match channels.get(channel) {
+            // Channel has been created
+            Some(users) => {
+                // Broadcast message to all users except this
+                for (peer_addr, peer_tx) in users {
+                    if peer_addr != user_addr {
+                        if let Err(_) = peer_tx.send(Message::text(message.to_string())) {
+                            return Err(SendError::BroadcastError);
+                        }
+                    }
+                }
+                Ok(())
+            }
+            // Channel does not exist
+            None => {
+                // Return error
+                Err(SendError::NonExistentChannel)
             }
         }
     }
