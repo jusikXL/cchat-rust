@@ -86,6 +86,11 @@ where
             Ok(())
         });
 
+        let send_message = |msg: &str, tx: &mpsc::UnboundedSender<Message>| {
+            tx.send(Message::text(msg))
+                .map_err(|e| ServerError::MessagePassing(e))
+        };
+
         while let Some(msg) = incoming.next().await {
             match msg {
                 Ok(Message::Text(text)) => {
@@ -93,41 +98,38 @@ where
                         let channel = text[5..].trim().to_string();
 
                         if let Err(e) = Self::join(addr, tx.clone(), channel, &channels) {
-                            tx.send(Message::text(format!("Error joining channel: {e:?}")))
-                                .map_err(|e| ServerError::MessagePassing(e))?;
+                            send_message(&format!("Error joining channel: {e:?}"), &tx)?;
                         } else {
-                            tx.send(Message::text(format!("Joined!")))
-                                .map_err(|e| ServerError::MessagePassing(e))?;
+                            send_message("Joined!", &tx)?;
                         }
                     } else if text.starts_with("/leave") {
                         let channel = text[6..].trim().to_string();
 
                         if let Err(e) = Self::leave(&addr, &channel, &channels) {
-                            tx.send(Message::text(format!("Error leaving channel: {e:?}")))
-                                .map_err(|e| ServerError::MessagePassing(e))?;
+                            send_message(&format!("Error leaving channel: {e:?}"), &tx)?;
                         } else {
-                            tx.send(Message::text(format!("Left!")))
-                                .map_err(|e| ServerError::MessagePassing(e))?;
+                            send_message("Left!", &tx)?;
                         }
                     } else if text.starts_with("/send") {
                         let parts: Vec<&str> = text[5..].trim().splitn(2, ' ').collect();
 
+                        if parts.len() < 2 {
+                            send_message(
+                                "Invalid /send usage. Expecting <channel> <message>",
+                                &tx,
+                            )?;
+                        }
+
                         if let Err(e) = Self::send(&addr, parts[1], parts[0], &channels) {
-                            tx.send(Message::text(format!("Error sending message: {e:?}")))
-                                .map_err(|e| ServerError::MessagePassing(e))?;
+                            send_message(&format!("Error sending message: {e:?}"), &tx)?;
                         } else {
-                            tx.send(Message::text(format!("Sent!")))
-                                .map_err(|e| ServerError::MessagePassing(e))?;
+                            send_message("Sent!", &tx)?;
                         }
                     } else {
-                        tx.send(Message::text(format!("Unknown command")))
-                            .map_err(|e| ServerError::MessagePassing(e))?;
+                        send_message("Unknown command", &tx)?;
                     }
                 }
-                Ok(_) => {
-                    tx.send(Message::text(format!("Unknown command")))
-                        .map_err(|e| ServerError::MessagePassing(e))?;
-                }
+                Ok(_) => send_message("Unknown command", &tx)?,
                 Err(e) => return Err(ServerError::WebSocketError(e)),
             }
         }
