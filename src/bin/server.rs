@@ -1,6 +1,5 @@
 use std::{
     collections::HashMap,
-    error::Error,
     net::SocketAddr,
     sync::{Arc, Mutex},
 };
@@ -45,7 +44,7 @@ where
         }
     }
 
-    pub async fn start(&self) -> Result<(), Box<dyn Error>> {
+    pub async fn start(&self) -> std::io::Result<()> {
         let listener = TcpListener::bind(&self.addr).await?;
         println!("Server: Listening");
 
