@@ -7,25 +7,22 @@ use std::{
 
 use tokio::{
     net::{TcpListener, TcpStream, ToSocketAddrs},
-    sync::mpsc::{self, UnboundedSender},
+    sync::mpsc::{self, error::SendError, UnboundedSender},
+    task::JoinError,
 };
 
 use futures_util::{SinkExt, StreamExt};
 
-use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::{Error as TungsteniteError, Message};
 
-enum JoinError {
-    AlreadyJoined,
-}
-
-enum LeaveError {
+#[derive(Debug)]
+enum ServerError {
+    UserAlreadyJoined,
     NonExistentChannel,
     NonExistentUser,
-}
-
-enum SendError {
-    NonExistentChannel,
-    BroadcastError,
+    MessagePassing(SendError<Message>),
+    WebSocketError(TungsteniteError),
+    JoinError(JoinError),
 }
 
 type User = UnboundedSender<Message>;
@@ -57,64 +54,80 @@ where
 
             // Spawn a separate task
             tokio::spawn(async move {
-                Self::handle_connection((stream, addr), channels).await;
+                if let Err(e) = Self::handle_connection((stream, addr), channels).await {
+                    eprintln!("Error handling connection from {addr}: {e:#?}");
+                }
             });
         }
 
         Ok(())
     }
 
-    async fn handle_connection((stream, addr): (TcpStream, SocketAddr), channels: Channels) {
-        // tokio::time::sleep(Duration::from_secs(1)).await; // simulate long processing
-
+    async fn handle_connection(
+        (stream, addr): (TcpStream, SocketAddr),
+        channels: Channels,
+    ) -> Result<(), ServerError> {
         let ws_stream = tokio_tungstenite::accept_async(stream)
             .await
-            .expect("websocket handshake");
+            .map_err(|e| ServerError::WebSocketError(e))?;
 
-        // let (write, read)
         let (mut outgoing, mut incoming) = ws_stream.split();
 
         let (tx, mut rx) = mpsc::unbounded_channel();
 
-        tokio::spawn(async move {
+        let outgoing_task = tokio::spawn(async move {
             while let Some(msg) = rx.recv().await {
                 // if we receive message from other clients
                 // send them down the stream
-                outgoing
-                    .send(msg)
-                    .await
-                    .expect("sending message from other clients");
+                if let Err(e) = outgoing.send(msg).await {
+                    return Err(ServerError::WebSocketError(e));
+                }
             }
+
+            Ok(())
         });
 
         while let Some(msg) = incoming.next().await {
-            // if we receive message from this client
-            // send them to other clients
-
             match msg {
                 Ok(Message::Text(text)) => {
                     if text.starts_with("/join") {
                         let channel = text[5..].trim().to_string();
 
-                        Self::join(addr, tx.clone(), channel, &channels);
+                        if let Err(e) = Self::join(addr, tx.clone(), channel, &channels) {
+                            tx.send(Message::text(format!("Error joining channel: {e:?}")))
+                                .map_err(|e| ServerError::MessagePassing(e))?;
+                        }
                     } else if text.starts_with("/leave") {
                         let channel = text[6..].trim().to_string();
 
-                        Self::leave(&addr, &channel, &channels);
+                        if let Err(e) = Self::leave(&addr, &channel, &channels) {
+                            tx.send(Message::text(format!("Error leaving channel: {e:?}")))
+                                .map_err(|e| ServerError::MessagePassing(e))?;
+                        }
                     } else if text.starts_with("/send") {
                         let parts: Vec<&str> = text[5..].trim().splitn(2, ' ').collect();
 
-                        Self::send(&addr, parts[1], parts[0], &channels);
+                        if let Err(e) = Self::send(&addr, parts[1], parts[0], &channels) {
+                            tx.send(Message::text(format!("Error sending message: {e:?}")))
+                                .map_err(|e| ServerError::MessagePassing(e))?;
+                        }
+                    } else {
+                        tx.send(Message::text(format!("Unknown command")))
+                            .map_err(|e| ServerError::MessagePassing(e))?;
                     }
                 }
                 Ok(_) => {
-                    // Handle non-text message
+                    tx.send(Message::text(format!("Unknown command")))
+                        .map_err(|e| ServerError::MessagePassing(e))?;
                 }
-                Err(e) => {
-                    // Handle error receiving message
-                }
+                Err(e) => return Err(ServerError::WebSocketError(e)),
             }
         }
+
+        outgoing_task
+            .await
+            .map_err(|e| ServerError::JoinError(e))??; // not sure how to handle it here
+        Ok(())
     }
 
     fn join(
@@ -122,7 +135,7 @@ where
         user_tx: User,
         channel: String,
         channels: &Channels,
-    ) -> Result<(), JoinError> {
+    ) -> Result<(), ServerError> {
         let mut channels = channels.lock().unwrap();
         println!("{user_addr} joins {channel}");
 
@@ -133,7 +146,7 @@ where
                     // User has already joined
                     Some(_) => {
                         // Return error
-                        Err(JoinError::AlreadyJoined)
+                        Err(ServerError::UserAlreadyJoined)
                     }
                     // User has not joined
                     None => {
@@ -155,7 +168,11 @@ where
         }
     }
 
-    fn leave(user_addr: &SocketAddr, channel: &str, channels: &Channels) -> Result<(), LeaveError> {
+    fn leave(
+        user_addr: &SocketAddr,
+        channel: &str,
+        channels: &Channels,
+    ) -> Result<(), ServerError> {
         let mut channels = channels.lock().unwrap();
         println!("{user_addr} leaves {channel}");
 
@@ -166,13 +183,13 @@ where
                     // User has been removed
                     Some(_) => Ok(()),
                     // Not found user
-                    None => Err(LeaveError::NonExistentUser),
+                    None => Err(ServerError::NonExistentUser),
                 }
             }
             // Channel does not exist
             None => {
                 // Return error
-                Err(LeaveError::NonExistentChannel)
+                Err(ServerError::NonExistentChannel)
             }
         }
     }
@@ -182,7 +199,7 @@ where
         message: &str,
         channel: &str,
         channels: &Channels,
-    ) -> Result<(), SendError> {
+    ) -> Result<(), ServerError> {
         let channels = channels.lock().unwrap();
         println!("{user_addr} sends {message} to {channel}");
 
@@ -192,9 +209,9 @@ where
                 // Broadcast message to all users except this
                 for (peer_addr, peer_tx) in users {
                     if peer_addr != user_addr {
-                        if let Err(_) = peer_tx.send(Message::text(message.to_string())) {
-                            return Err(SendError::BroadcastError);
-                        }
+                        peer_tx
+                            .send(Message::text(message.to_string()))
+                            .map_err(|e| ServerError::MessagePassing(e))?
                     }
                 }
                 Ok(())
@@ -202,7 +219,7 @@ where
             // Channel does not exist
             None => {
                 // Return error
-                Err(SendError::NonExistentChannel)
+                Err(ServerError::NonExistentChannel)
             }
         }
     }
