@@ -57,9 +57,7 @@ impl Client {
                     Err(_) => continue,
                 };
 
-                if let Err(e) = tx.send(Message::text(text)) {
-                    return Err(e);
-                }
+                tx.send(Message::text(text))?
             }
         });
 
@@ -72,25 +70,28 @@ impl Client {
             Ok(())
         });
 
-        let incoming_to_stdout = tokio::spawn(async move {
-            while let Some(msg) = incoming.next().await {
-                match msg {
-                    Ok(Message::Text(text)) => {
-                        let mut stdout = io::stdout();
+        let incoming_to_stdout: JoinHandle<Result<(), TungsteniteError>> =
+            tokio::spawn(async move {
+                while let Some(msg) = incoming.next().await {
+                    match msg {
+                        Ok(Message::Text(text)) => {
+                            let mut stdout = io::stdout();
 
-                        stdout.write_all(text.as_bytes()).await.unwrap();
-                        stdout.write_all(b"\n").await.unwrap();
-                        stdout.flush().await.unwrap();
-                    }
-                    Ok(_) => {
-                        // ignore message of invalid format
-                    }
-                    Err(_e) => {
-                        // ignore messages that cannot be resolved
+                            stdout.write_all(text.as_bytes()).await?;
+                            stdout.write_all(b"\n").await?;
+                            stdout.flush().await?;
+                        }
+                        Ok(_) => {
+                            // ignore message of invalid format
+                        }
+                        Err(_e) => {
+                            // ignore messages that cannot be resolved
+                        }
                     }
                 }
-            }
-        });
+
+                Ok(())
+            });
 
         // await each of the tasks, panic if necessary
         stdin_to_tx
@@ -103,7 +104,10 @@ impl Client {
             .map_err(|e| ClientError::Join(e))?
             .map_err(|e| ClientError::WebSocket(e))?;
 
-        incoming_to_stdout.await.map_err(|e| ClientError::Join(e))?;
+        incoming_to_stdout
+            .await
+            .map_err(|e| ClientError::Join(e))?
+            .map_err(|e| ClientError::WebSocket(e))?;
 
         Ok(())
     }
