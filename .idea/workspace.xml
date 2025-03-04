@@ -8,8 +8,13 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="7212fe77-b8ad-4d45-acac-773d30b5de5c" name="Changes" comment="">
+      <change beforePath="$PROJECT_DIR$/.gitignore" beforeDir="false" afterPath="$PROJECT_DIR$/.gitignore" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/cchat.iml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/cchat.iml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/modules.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/modules.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Cargo.lock" beforeDir="false" afterPath="$PROJECT_DIR$/Cargo.lock" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Cargo.toml" beforeDir="false" afterPath="$PROJECT_DIR$/Cargo.toml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/bin/client.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/bin/client.rs" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/bin/server.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/bin/server.rs" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
@@ -95,6 +100,7 @@
       <updated>1740426236363</updated>
       <workItem from="1740755976314" duration="3711000" />
       <workItem from="1740776379335" duration="5088000" />
+      <workItem from="1741131908059" duration="74000" />
     </task>
     <servers />
   </component>

@@ -1,7 +1,7 @@
 use futures_util::{SinkExt, StreamExt};
 use tokio::{
     io::{self, AsyncReadExt, AsyncWriteExt},
-    sync::mpsc::{self, error::SendError},
+    sync::mpsc::{self, error::SendError, UnboundedSender},
     task::{JoinError, JoinHandle},
 };
 
@@ -34,45 +34,25 @@ impl Client {
         let (ws_stream, _) = connect_async(&self.server)
             .await
             .map_err(|e| ClientError::WebSocket(e))?;
-        let (mut outgoing, mut incoming) = ws_stream.split();
+        let (mut sink, mut stream) = ws_stream.split();
 
         println!("Client: Running");
 
         // read stdin
-        let stdin_to_tx: JoinHandle<Result<(), SendError<Message>>> = tokio::spawn(async move {
-            let mut stdin = io::stdin();
-
-            loop {
-                let mut buf = vec![0; 1024];
-
-                match stdin.read(&mut buf).await {
-                    Err(_) | Ok(0) => {
-                        continue; // not sure here
-                    }
-                    Ok(n) => buf.truncate(n),
-                };
-
-                let text = match String::from_utf8(buf) {
-                    Ok(text) => text,
-                    Err(_) => continue,
-                };
-
-                tx.send(Message::text(text))?
-            }
-        });
+        let stdin_to_tx = tokio::spawn(async move { stdin_to_tx(&tx).await });
 
         // receive messages from stdin and send to sink
-        let rx_to_outgoing: JoinHandle<Result<(), TungsteniteError>> = tokio::spawn(async move {
+        let rx_to_sink: JoinHandle<Result<(), TungsteniteError>> = tokio::spawn(async move {
             while let Some(msg) = rx.recv().await {
-                outgoing.send(msg).await?
+                sink.send(msg).await?
             }
 
-            Ok(())
+            Ok(()) // hm on None I will return Ok() - not good
         });
 
         let incoming_to_stdout: JoinHandle<Result<(), TungsteniteError>> =
             tokio::spawn(async move {
-                while let Some(msg) = incoming.next().await {
+                while let Some(msg) = stream.next().await {
                     match msg {
                         Ok(Message::Text(text)) => {
                             let mut stdout = io::stdout();
@@ -99,7 +79,7 @@ impl Client {
             .map_err(|e| ClientError::Join(e))?
             .map_err(|e| ClientError::MessagePassing(e))?;
 
-        rx_to_outgoing
+        rx_to_sink
             .await
             .map_err(|e| ClientError::Join(e))?
             .map_err(|e| ClientError::WebSocket(e))?;
@@ -112,6 +92,30 @@ impl Client {
         Ok(())
     }
 }
+
+async fn stdin_to_tx(tx: &UnboundedSender<Message>) -> Result<(), SendError<Message>> {
+    let mut stdin = io::stdin();
+
+    loop {
+        let mut buf = vec![0; 1024];
+
+        match stdin.read(&mut buf).await {
+            Err(_) | Ok(0) => {
+                continue; // not sure here
+            }
+            Ok(n) => buf.truncate(n),
+        };
+
+        let text = match String::from_utf8(buf) {
+            Ok(text) => text,
+            Err(_) => continue,
+        };
+
+        tx.send(Message::text(text))?
+    }
+}
+
+// TODO: move tokio tasks blocks to separate functions
 
 #[tokio::main]
 async fn main() {
