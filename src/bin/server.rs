@@ -16,12 +16,12 @@ use tokio_tungstenite::tungstenite::{Error as TungsteniteError, Message};
 
 #[derive(Debug)]
 pub enum ServerError {
-    UserAlreadyJoined,
-    NonExistentChannel,
-    UserNotJoined,
+    NotJoined,
+    AlreadyJoined,
+    NoSuchChannel,
     MessagePassing(SendError<Message>),
-    WebSocketError(TungsteniteError),
-    JoinError(JoinError),
+    WebSocket(TungsteniteError),
+    Join(JoinError),
 }
 
 type User = UnboundedSender<Message>;
@@ -68,7 +68,7 @@ where
     ) -> Result<(), ServerError> {
         let ws_stream = tokio_tungstenite::accept_async(stream)
             .await
-            .map_err(|e| ServerError::WebSocketError(e))?;
+            .map_err(|e| ServerError::WebSocket(e))?;
 
         let (mut outgoing, mut incoming) = ws_stream.split();
 
@@ -80,7 +80,7 @@ where
                 outgoing
                     .send(msg)
                     .await
-                    .map_err(|e| ServerError::WebSocketError(e))?
+                    .map_err(|e| ServerError::WebSocket(e))?
             }
 
             Ok(())
@@ -130,13 +130,11 @@ where
                     }
                 }
                 Ok(_) => send_message("Unknown command", &tx)?,
-                Err(e) => return Err(ServerError::WebSocketError(e)),
+                Err(e) => return Err(ServerError::WebSocket(e)),
             }
         }
 
-        outgoing_task
-            .await
-            .map_err(|e| ServerError::JoinError(e))??;
+        outgoing_task.await.map_err(|e| ServerError::Join(e))??;
 
         Ok(())
     }
@@ -154,7 +152,7 @@ where
             Some(users) => {
                 match users.get_mut(&user_addr) {
                     // User has already joined
-                    Some(_) => Err(ServerError::UserAlreadyJoined),
+                    Some(_) => Err(ServerError::AlreadyJoined),
                     // User has not joined
                     None => {
                         // Add user
@@ -189,11 +187,11 @@ where
                     // User has been removed
                     Some(_) => Ok(()),
                     // Not found user
-                    None => Err(ServerError::UserNotJoined),
+                    None => Err(ServerError::NotJoined),
                 }
             }
             // Channel does not exist
-            None => Err(ServerError::NonExistentChannel),
+            None => Err(ServerError::NoSuchChannel),
         }
     }
 
@@ -223,11 +221,11 @@ where
                         Ok(())
                     }
                     // If user has not joined the channel
-                    None => Err(ServerError::UserNotJoined),
+                    None => Err(ServerError::NotJoined),
                 }
             }
             // Channel does not exist
-            None => Err(ServerError::NonExistentChannel),
+            None => Err(ServerError::NoSuchChannel),
         }
     }
 }

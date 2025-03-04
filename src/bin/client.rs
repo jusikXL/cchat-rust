@@ -1,7 +1,8 @@
 use futures_util::{SinkExt, StreamExt};
 use tokio::{
     io::{self, AsyncReadExt, AsyncWriteExt},
-    sync::mpsc,
+    sync::mpsc::{self, error::SendError},
+    task::{JoinError, JoinHandle},
 };
 
 use tokio_tungstenite::{
@@ -11,7 +12,9 @@ use tokio_tungstenite::{
 
 #[derive(Debug)]
 pub enum ClientError {
-    WebSocketError(TungsteniteError),
+    MessagePassing(SendError<Message>),
+    Join(JoinError),
+    WebSocket(TungsteniteError),
 }
 
 pub struct Client {
@@ -25,49 +28,82 @@ impl Client {
         Client { server }
     }
 
-    pub async fn start(&self) -> Result<(), TungsteniteError> {
+    pub async fn start(&self) -> Result<(), ClientError> {
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let (ws_stream, _) = connect_async(&self.server).await?;
+
+        let (ws_stream, _) = connect_async(&self.server)
+            .await
+            .map_err(|e| ClientError::WebSocket(e))?;
         let (mut outgoing, mut incoming) = ws_stream.split();
 
+        println!("Client: Running");
+
         // read stdin
-        tokio::spawn(async move {
+        let stdin_to_tx: JoinHandle<Result<(), SendError<Message>>> = tokio::spawn(async move {
             let mut stdin = io::stdin();
 
             loop {
                 let mut buf = vec![0; 1024];
 
-                let n = match stdin.read(&mut buf).await {
-                    Err(_) | Ok(0) => break,
-                    Ok(n) => n,
+                match stdin.read(&mut buf).await {
+                    Err(_) | Ok(0) => {
+                        continue; // not sure here
+                    }
+                    Ok(n) => buf.truncate(n),
                 };
 
-                buf.truncate(n);
-                let text = String::from_utf8(buf).unwrap();
-                tx.send(Message::text(text)).unwrap();
+                let text = match String::from_utf8(buf) {
+                    Ok(text) => text,
+                    Err(_) => continue,
+                };
+
+                if let Err(e) = tx.send(Message::text(text)) {
+                    return Err(e);
+                }
             }
         });
 
         // receive messages from stdin and send to sink
-        tokio::spawn(async move {
+        let rx_to_outgoing: JoinHandle<Result<(), TungsteniteError>> = tokio::spawn(async move {
             while let Some(msg) = rx.recv().await {
-                outgoing.send(msg).await.unwrap()
+                outgoing.send(msg).await?
+            }
+
+            Ok(())
+        });
+
+        let incoming_to_stdout = tokio::spawn(async move {
+            while let Some(msg) = incoming.next().await {
+                match msg {
+                    Ok(Message::Text(text)) => {
+                        let mut stdout = io::stdout();
+
+                        stdout.write_all(text.as_bytes()).await.unwrap();
+                        stdout.write_all(b"\n").await.unwrap();
+                        stdout.flush().await.unwrap();
+                    }
+                    Ok(_) => {
+                        // ignore message of invalid format
+                    }
+                    Err(_e) => {
+                        // ignore messages that cannot be resolved
+                    }
+                }
             }
         });
 
-        while let Some(msg) = incoming.next().await {
-            match msg {
-                Ok(Message::Text(text)) => {
-                    let mut stdout = io::stdout();
+        // await each of the tasks, panic if necessary
+        stdin_to_tx
+            .await
+            .map_err(|e| ClientError::Join(e))?
+            .map_err(|e| ClientError::MessagePassing(e))?;
 
-                    stdout.write_all(text.as_bytes()).await.unwrap();
-                    stdout.write_all(b"\n").await.unwrap();
-                    stdout.flush().await.unwrap();
-                }
-                Ok(_) => {}
-                Err(_e) => {}
-            }
-        }
+        rx_to_outgoing
+            .await
+            .map_err(|e| ClientError::Join(e))?
+            .map_err(|e| ClientError::WebSocket(e))?;
+
+        incoming_to_stdout.await.map_err(|e| ClientError::Join(e))?;
 
         Ok(())
     }
@@ -78,6 +114,6 @@ async fn main() {
     let client = Client::new("127.0.0.1:8080");
 
     if let Err(e) = client.start().await {
-        eprint!("Client error: {e}");
+        eprint!("Client error: {e:#?}");
     }
 }
