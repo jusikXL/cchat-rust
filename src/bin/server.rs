@@ -239,6 +239,6 @@ async fn main() {
     // start server on current thread
     // no specific new thread is created for that
     if let Err(e) = server.start().await {
-        eprintln!("Server Error: {e}");
+        eprintln!("Error starting the server: {e}");
     }
 }
